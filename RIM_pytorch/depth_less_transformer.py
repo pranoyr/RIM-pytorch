@@ -79,34 +79,25 @@ class Feedforward(Module):
         sim = sim * F.gelu(gates)
         return self.values(sim)
 
-# block
-
-class TransformerBlock(Module):
-    def __init__(
-        self,
-        dim,
-        dim_head = 64,
-        heads = 8
-    ):
-        super().__init__()
-
-    def forward(
-        self,
-        tokens
-    ):
-        return tokens
-
 # classes
 
 class DepthlessTransformer(Module):
     def __init__(
-        self
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        ff_expansion_factor = 4.
     ):
         super().__init__()
-        raise NotImplementedError
+        self.attn = Attention(dim, dim_head = dim_head, heads = heads)
+        self.ff = Feedforward(dim, ff_expansion_factor)
 
     def forward(
         self,
         tokens
     ):
-        return tokens
+        attn_out = self.attn(tokens)
+        ff_out = self.ff(tokens)
+
+        return attn_out + ff_out
