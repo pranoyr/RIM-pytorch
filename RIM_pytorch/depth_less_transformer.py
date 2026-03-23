@@ -14,7 +14,9 @@ def default(v, d):
 
 # classes
 
-class RIM(Module):
-    def __init__(self):
+class DepthlessTransformer(Module):
+    def __init__(
+        self
+    ):
         super().__init__()
         raise NotImplementedError
