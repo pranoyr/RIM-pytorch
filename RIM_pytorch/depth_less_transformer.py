@@ -185,13 +185,20 @@ class DepthlessTransformer(Module):
 
         # message passing
 
-        for i in range(self.num_message_exchanges):
+        for index in range(self.num_message_exchanges):
+            is_last = index == (self.num_message_exchanges - 1)
+
             attended = self.attn_forward(attn_parameters, tokens)
             retrieved_memories = self.ff_forward(ff_parameters, tokens)
 
             # add to processed messages
 
             messages.extend([attended, retrieved_memories])
+
+            # on the last round, one query token from readout block aggregate / attention residual
+
+            if is_last:
+                continue
 
             # then we just do attention pooling / residual for next round
             # will use the initial messages coming in as the queries, all products of all the blocks become messages
