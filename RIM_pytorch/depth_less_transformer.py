@@ -41,13 +41,15 @@ class Attention(Module):
         self,
         dim,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        key_rmsnorm = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
 
         self.norm = nn.RMSNorm(dim)
+        self.maybe_key_norm = nn.RMSNorm(dim_head) if key_rmsnorm else nn.Identity()
 
         self.to_q = LinearNoBias(dim, dim_inner)
         self.to_kv = LinearNoBias(dim, dim_inner * 2)
@@ -74,6 +76,8 @@ class Attention(Module):
         q, k, v = (self.to_q(tokens), *self.to_kv(context).chunk(2, dim = -1))
 
         q, k, v = map(self.split_heads, (q, k, v))
+
+        k = self.maybe_key_norm(k)
 
         sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
 
@@ -137,7 +141,7 @@ class DepthlessTransformer(Module):
 
         # the attention residual, or just putting together the information coming from various recurrent modules
 
-        self.attn_residual = Attention(dim, dim_head = dim_head, heads = heads)
+        self.attn_residual = Attention(dim, key_rmsnorm = True, dim_head = dim_head, heads = heads)
 
         # functional forwards
 
