@@ -42,11 +42,13 @@ class Attention(Module):
         dim,
         dim_head = 64,
         heads = 8,
+        causal = False,
         key_rmsnorm = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
+        self.causal = causal
 
         self.norm = nn.RMSNorm(dim)
         self.maybe_key_norm = nn.RMSNorm(dim_head) if key_rmsnorm else nn.Identity()
@@ -55,6 +57,8 @@ class Attention(Module):
         self.to_kv = LinearNoBias(dim, dim_inner * 2)
 
         self.to_out = LinearNoBias(dim_inner, dim)
+
+        self.to_gates = nn.Sequential(LinearNoBias(dim, heads), Rearrange('... n h -> ... h n 1'))
 
         self.split_heads = Rearrange('b n (h d) -> b h n d', h = heads)
 
@@ -81,9 +85,16 @@ class Attention(Module):
 
         sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
 
+        if self.causal:
+            i, j = sim.shape[-2:]
+            causal_mask = torch.ones((i, j), dtype = torch.bool).triu(j - i + 1)
+            sim = sim.masked_fill(causal_mask, -torch.finfo(sim.dtype).max)
+
         attn = sim.softmax(dim = -1)
 
         out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+
+        out = self.to_gates(tokens).sigmoid() * out
 
         out = self.merge_heads(out)
         out = self.to_out(out)
@@ -124,6 +135,7 @@ class DepthlessTransformer(Module):
         num_message_exchanges = 6,
         dim_head = 64,
         heads = 8,
+        causal = False,
         ff_expansion_factor = 4.
     ):
         super().__init__()
@@ -136,7 +148,7 @@ class DepthlessTransformer(Module):
 
         # define attention and feedforward
 
-        attn = Attention(dim, dim_head = dim_head, heads = heads)
+        attn = Attention(dim, causal = causal, dim_head = dim_head, heads = heads)
         ff = Feedforward(dim, ff_expansion_factor)
 
         # the attention residual, or just putting together the information coming from various recurrent modules
@@ -228,7 +240,7 @@ class DepthlessTransformer(Module):
         if not exists(self.readout):
             return tokens
 
-        # the readout itself is just a another message producer
+        # the readout itself is just another message producer
 
         queries = repeat(self.query_readout, 'd -> b n 1 d', b = batch, n = seq_len)
 
