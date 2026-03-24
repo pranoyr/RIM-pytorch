@@ -202,13 +202,15 @@ class DepthlessTransformer(Module):
 
         # message passing
 
-        for index in range(self.num_message_exchanges):
-            is_last = index == (self.num_message_exchanges - 1)
+        for count in enumerate(range(self.num_message_exchanges), start = 1):
+            is_last = count == self.num_message_exchanges
+
+            # representations go into all of the blocks at once, without any notion of depth
 
             attended = self.attn_forward(attn_parameters, tokens)
             retrieved_memories = self.ff_forward(ff_parameters, tokens)
 
-            # add to processed messages
+            # add outputs to processed messages
 
             messages.extend([attended, retrieved_memories])
 
@@ -217,8 +219,8 @@ class DepthlessTransformer(Module):
             if is_last:
                 continue
 
-            # then we just do attention pooling / residual for next round
-            # will use the initial messages coming in as the queries, all products of all the blocks become messages
+            # then we just do attention pooling (attention 'residual') for next round
+            # will use the initial messages coming in as the queries, all products of all the blocks become messages - voting phase
 
             packed_messages, _ = pack(messages, '* b n d') # (message blocks) packed
             all_messages = repeat(packed_messages, 'm b n d -> (b l) n m d', l = blocks)
