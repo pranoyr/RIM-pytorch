@@ -4,6 +4,12 @@ Explorations into [Recurrent Independent Mechanisms](https://arxiv.org/abs/1909.
 
 [Jeff Hawkins](https://www.numenta.com/blog/2019/01/16/the-thousand-brains-theory-of-intelligence/) would be delighted if this were to pan out
 
+## Install
+
+```bash
+$ pip install RIM-pytorch
+```
+
 ## Citations
 
 ```bibtex
