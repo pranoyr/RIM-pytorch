@@ -4,7 +4,7 @@ from functools import partial
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.nn import Module, ModuleList, Linear, ParameterList
+from torch.nn import Module, Linear, Parameter, ParameterList
 from torch.func import vmap, functional_call
 
 from torch_einops_utils import pack_with_inverse
@@ -34,6 +34,20 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+# init
+
+@torch.no_grad()
+def init_ensemble_weights_(params, names):
+    for name, param in zip(names, params):
+        if 'norm' in name:
+            nn.init.ones_(param)
+        elif 'bias' in name:
+            nn.init.zeros_(param)
+        elif 'weight' in name:
+            fan_in = param.shape[-1]
+            bound = fan_in ** -0.5
+            nn.init.uniform_(param, -bound, bound)
 
 # attention
 
@@ -134,6 +148,37 @@ class Feedforward(Module):
         sim = sim * F.gelu(gates)
         return self.values(sim)
 
+# ensemble
+
+class Ensemble(Module):
+    def __init__(
+        self,
+        net: Module,
+        ensemble_size: int
+    ):
+        super().__init__()
+        repeat_blocks = Reduce('... -> l ...', 'repeat', l = ensemble_size)
+
+        named_params = dict(net.named_parameters())
+
+        # avoid the issue with period in the parameter names
+
+        self.param_names = named_params.keys()
+        self.net_parameters = ParameterList([Parameter(repeat_blocks(param).clone()) for param in named_params.values()])
+
+        init_ensemble_weights_(self.net_parameters, self.param_names)
+
+        # vmapping
+
+        def net_forward(params, tokens, *args, **kwargs):
+            return functional_call(net, params, args = (tokens, *args), kwargs = kwargs)
+
+        self.net_forward = vmap(net_forward, in_dims = 0)
+
+    def forward(self, tokens, *args, **kwargs):
+        params = dict(zip(self.param_names, self.net_parameters))
+        return self.net_forward(params, tokens, *args, **kwargs)
+
 # classes
 
 class DepthlessTransformer(Module):
@@ -154,7 +199,7 @@ class DepthlessTransformer(Module):
         self.num_message_exchanges = num_message_exchanges
 
         self.num_blocks = num_blocks
-        repeat_blocks = Reduce('... -> blocks ...', 'repeat', blocks = num_blocks)
+        repeat_blocks = Reduce('... -> l ...', 'repeat', l = num_blocks)
         self.repeat_blocks = repeat_blocks
 
         self.use_pope = use_pope
@@ -170,27 +215,10 @@ class DepthlessTransformer(Module):
 
         self.attn_residual = Attention(dim, key_rmsnorm = True, dim_head = dim_head, heads = heads)
 
-        # functional forwards
+        # make ensemble
 
-        def attn_forward(params, inputs, pos_emb = None):
-            return functional_call(attn, params, inputs, kwargs = dict(pos_emb = pos_emb))
-
-        def ff_forward(params, inputs):
-            return functional_call(ff, params, inputs)
-
-        attn_named_params = dict(attn.named_parameters())
-        ff_named_params = dict(ff.named_parameters())
-
-        self.attn_parameter_names = attn_named_params.keys()
-        self.attn_parameters = ParameterList([repeat_blocks(param) for param in attn_named_params.values()])
-
-        self.ff_parameter_names = ff_named_params.keys()
-        self.ff_parameters = ParameterList([repeat_blocks(param) for param in ff_named_params.values()])
-
-        # vmap over blocks dimension to call all block at once across tokens
-
-        self.attn_forward = vmap(attn_forward, in_dims = (0, 0, None))
-        self.ff_forward = vmap(ff_forward, in_dims = (0, 0))
+        self.attn_ensemble = Ensemble(attn, num_blocks)
+        self.ff_ensemble = Ensemble(ff, num_blocks)
 
         # readout
 
@@ -202,23 +230,18 @@ class DepthlessTransformer(Module):
         tokens,
         return_messages = False
     ):
-        device = tokens.device
         batch, seq_len, blocks = *tokens.shape[:2], self.num_blocks
 
-        tokens = self.repeat_blocks(tokens) # (blocks b n d)
-
-        # parameters
-
-        attn_parameters = dict(zip(self.attn_parameter_names, self.attn_parameters))
-        ff_parameters = dict(zip(self.ff_parameter_names, self.ff_parameters))
+        tokens = self.repeat_blocks(tokens) # (l b n d)
 
         # reframed as recurrent processing of tokens with message passing (attention residual)
 
         messages = [tokens]
 
-        pos_emb = None
+        attn_kwargs = dict()
         if self.use_pope:
             pos_emb = self.pope(seq_len)
+            attn_kwargs = dict(pos_emb = pos_emb)
 
         # message passing
 
@@ -227,8 +250,8 @@ class DepthlessTransformer(Module):
 
             # representations go into all of the blocks at once, without any notion of depth
 
-            attended = self.attn_forward(attn_parameters, tokens, pos_emb)
-            retrieved_memories = self.ff_forward(ff_parameters, tokens)
+            attended = self.attn_ensemble(tokens, **attn_kwargs)
+            retrieved_memories = self.ff_ensemble(tokens)
 
             # add outputs to processed messages
 
