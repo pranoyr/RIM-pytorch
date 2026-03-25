@@ -45,6 +45,7 @@ class Attention(Module):
         heads = 8,
         causal = False,
         key_rmsnorm = False,
+        dropout = 0.,
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -60,6 +61,9 @@ class Attention(Module):
         self.to_out = LinearNoBias(dim_inner, dim)
 
         self.to_gates = nn.Sequential(LinearNoBias(dim, heads), Rearrange('... n h -> ... h n 1'))
+
+        self.dropout_prob = dropout
+        self.dropout = nn.Dropout(dropout)
 
         self.split_heads = Rearrange('b n (h d) -> b h n d', h = heads)
 
@@ -90,7 +94,8 @@ class Attention(Module):
             out = flash_attn_with_pope(
                 q, k, v,
                 pos_emb = pos_emb,
-                causal = self.causal
+                causal = self.causal,
+                dropout = self.dropout_prob
             )
         else:
             sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
@@ -101,6 +106,8 @@ class Attention(Module):
                 sim = sim.masked_fill(causal_mask, -torch.finfo(sim.dtype).max)
 
             attn = sim.softmax(dim = -1)
+
+            attn = self.dropout(attn)
 
             out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
 
@@ -159,7 +166,7 @@ class Ensemble(Module):
         def net_forward(params, tokens, *args, **kwargs):
             return functional_call(net, params, args = (tokens, *args), kwargs = kwargs)
 
-        self.net_forward = vmap(net_forward, in_dims = 0)
+        self.net_forward = vmap(net_forward, in_dims = 0, randomness = 'different')
 
     @torch.no_grad()
     def init_(self):
