@@ -194,7 +194,10 @@ class EnsemblesWithMessagePassing(Module):
         self,
         modules: dict[str, Module],
         ensemble_size: int,
-        voting_attn: Module,
+        *,
+        dim: int | None = None,
+        voting_attn: Module | None = None,
+        voting_attn_kwargs: dict = dict(dim_head = 64, heads = 8),
         num_message_exchanges: int = 1
     ):
         super().__init__()
@@ -204,6 +207,11 @@ class EnsemblesWithMessagePassing(Module):
         self.ensembles = nn.ModuleDict({
             name: Ensemble(module, ensemble_size) for name, module in modules.items()
         })
+
+        assert isinstance(voting_attn, Module) ^ exists(dim), 'either voting_attn is passed in as a Module or dim is passed in'
+
+        if not isinstance(voting_attn, Module):
+            voting_attn = Attention(dim, key_rmsnorm = True, **voting_attn_kwargs)
 
         self.voting_attn = voting_attn
 
@@ -237,7 +245,7 @@ class EnsemblesWithMessagePassing(Module):
                 out = ensemble(tokens, **kwargs)
                 messages.append(out)
 
-            if is_last:
+            if is_last and return_all_messages:
                 continue
 
             # then we just do attention pooling (attention 'residual') for next round
@@ -257,12 +265,10 @@ class EnsemblesWithMessagePassing(Module):
 
             tokens = pooled_messages
 
-        assert tokens.shape == messages[0].shape
-
         if not return_all_messages:
             return tokens
 
-        return tokens, messages
+        return messages
 
 # classes
 
@@ -294,10 +300,6 @@ class DepthlessTransformer(Module):
         attn = Attention(dim, causal = causal, dim_head = dim_head, heads = heads)
         ff = Feedforward(dim, ff_expansion_factor)
 
-        # the attention residual, or just putting together the information coming from various recurrent modules
-
-        self.attn_residual = Attention(dim, key_rmsnorm = True, dim_head = dim_head, heads = heads)
-
         # token embedding
 
         self.token_emb = nn.Embedding(num_tokens, dim) if exists(num_tokens) else None
@@ -310,9 +312,14 @@ class DepthlessTransformer(Module):
                 ff = ff
             ),
             ensemble_size = num_blocks,
-            voting_attn = self.attn_residual,
+            dim = dim,
+            voting_attn_kwargs = dict(dim_head = dim_head, heads = heads),
             num_message_exchanges = num_message_exchanges
         )
+
+        # the attention residual, or just putting together the information coming from various recurrent modules
+
+        self.attn_residual = self.ensembles_with_message_passing.voting_attn
 
         # readout
 
@@ -339,7 +346,7 @@ class DepthlessTransformer(Module):
 
         # message passing
 
-        tokens, messages = self.ensembles_with_message_passing(
+        messages = self.ensembles_with_message_passing(
             tokens,
             module_kwargs = module_kwargs,
             repeat_input_for_ensemble = True,
